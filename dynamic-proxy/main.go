@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	mycache "dynamic-proxy/cache"
+	httphelper "dynamic-proxy/util"
 	"errors"
 	"fmt"
 	"time"
@@ -14,28 +16,26 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+
+	"github.com/eko/gocache/lib/v4/store"
 	// "time"
 )
 
-func NewServer(logger *log.Logger, config *Config) http.Handler {
-	mux := http.NewServeMux()
-	addRoutes(mux, logger, config)
+func NewServer(logger *log.Logger, config *Config, rateLimitCache mycache.RateLimitCache) http.Handler {
 
-	var handler http.Handler = mux
-	handler = loggingMiddleware(logger, handler)
-	return handler
+	// Create a router
+	r := httphelper.NewRouter(loggingMiddleware(logger))
+
+	// Handle proxy
+	r.Any("/", dynamicProxyHandler(logger, config, rateLimitCache), rateLimitByIpMiddleware(logger, rateLimitCache))
+
+	// Health check
+	r.Get("/healthz", handleHealthz(logger))
+
+	return r
 }
 
-func addRoutes(
-	mux *http.ServeMux,
-	logger *log.Logger,
-	config *Config,
-) {
-	mux.HandleFunc("/healthz", handleHealthz(logger))
-	mux.HandleFunc("/", dynamicProxyHandler(logger, config))
-}
-
-func dynamicProxyHandler(logger *log.Logger, config *Config) http.HandlerFunc {
+func dynamicProxyHandler(logger *log.Logger, config *Config, rateLimitCache mycache.RateLimitCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isHttps := false
 		if r.TLS != nil {
@@ -46,6 +46,7 @@ func dynamicProxyHandler(logger *log.Logger, config *Config) http.HandlerFunc {
 		targetHostname, err := determineBackend(r.Host, config.TargetBackend, isHttps)
 
 		if err != nil {
+			handleNotFoundRateLimiter(r.RemoteAddr, logger, rateLimitCache)
 			http.Error(w, "Bad gateway", http.StatusBadGateway)
 			logger.Printf("Error determining backend for host %s: %v\n", r.Host, err)
 		}
@@ -68,11 +69,53 @@ func handleHealthz(logger *log.Logger) http.HandlerFunc {
 	}
 }
 
-func loggingMiddleware(logger *log.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logger.Printf("Received request: %s %s", r.Method, r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
+func rateLimitByIpMiddleware(logger *log.Logger, rateLimitCache mycache.RateLimitCache) httphelper.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			logger.Printf("Request from IP: %s\n", r.RemoteAddr)
+			ctx := context.TODO()
+			// Check if user is rate limited
+			val, err := rateLimitCache.Get(ctx, fmt.Sprintf("rl-%s", r.RemoteAddr))
+			if err != nil {
+				// If we do not get a value in the store, we can assume the user is not being rate limited
+				next.ServeHTTP(w, r)
+			}
+			logger.Printf("Rate limit value: %v\n", val)
+			if val >= 10 {
+				http.Error(w, "Rate limited", http.StatusTooManyRequests)
+				logger.Printf("Rate limited user: %s\n", r.RemoteAddr)
+			} else {
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
+func handleNotFoundRateLimiter(remoteAddr string, logger *log.Logger, rateLimitCache mycache.RateLimitCache) error {
+	ctx := context.TODO()
+	// If a requested route is not found, we will add 1 to the rate limiter
+	currentLimit := 0
+	// Get their current val
+	currVal, err := rateLimitCache.Get(ctx, fmt.Sprintf("rl-%s", remoteAddr))
+	if err != nil {
+		// Key doesn't exist. That's ok, we'll just increase by 1
+		currentLimit = 1
+	} else {
+		// add int32
+		currentLimit = currVal + 1
+	}
+
+	// Update the rate limit
+	return rateLimitCache.Set(ctx, fmt.Sprintf("rl-%s", remoteAddr), currentLimit, store.WithCost(1), store.WithExpiration(1*time.Minute))
+}
+
+func loggingMiddleware(logger *log.Logger) httphelper.Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			logger.Printf("Received request: %s %s", r.Method, r.URL.Path)
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func NewProxy(targetBackend string, targetHostname string) (*httputil.ReverseProxy, error) {
@@ -153,8 +196,9 @@ func run(
 	ctx context.Context,
 	logger *log.Logger,
 	config *Config,
+	rateLimitCache mycache.RateLimitCache,
 ) error {
-	srv := NewServer(logger, config)
+	srv := NewServer(logger, config, rateLimitCache)
 	httpServer := &http.Server{
 		Addr:    net.JoinHostPort(config.Host, config.Port),
 		Handler: srv,
@@ -195,7 +239,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, logger, config); err != nil {
+	// Setup cache
+	rateLimitCache := mycache.CreateRateLimitCacheManager()
+
+	if err := run(ctx, logger, config, rateLimitCache); err != nil {
 		logger.Fatalf("Server exited with error: %s\n", err)
 	}
 }

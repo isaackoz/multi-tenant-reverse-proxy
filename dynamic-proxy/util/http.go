@@ -1,4 +1,4 @@
-package util_http
+package httphelper
 
 import (
 	"net/http"
@@ -6,54 +6,62 @@ import (
 )
 
 type (
-	middleware func(http.Handler) http.Handler
-	router     struct {
+	Middleware func(http.Handler) http.Handler
+	Router     struct {
 		*http.ServeMux
-		chain []middleware
+		chain []Middleware
 	}
 )
 
-func NewRouter(mx ...middleware) *router {
-	return &router{ServeMux: &http.ServeMux{}, chain: mx}
+func NewRouter(mx ...Middleware) *Router {
+	return &Router{ServeMux: &http.ServeMux{}, chain: mx}
 }
 
-func (r *router) Use(mx ...middleware) {
+func (r *Router) Use(mx ...Middleware) {
 	r.chain = append(r.chain, mx...)
 }
 
-func (r *router) Group(fn func(r *router)) {
-	fn(&router{ServeMux: r.ServeMux, chain: slices.Clone(r.chain)})
+func (r *Router) Group(fn func(r *Router)) {
+	fn(&Router{ServeMux: r.ServeMux, chain: slices.Clone(r.chain)})
 }
 
-func (r *router) Get(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Get(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodGet, path, fn, mx)
 }
 
-func (r *router) Post(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Post(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodPost, path, fn, mx)
 }
 
-func (r *router) Put(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Put(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodPut, path, fn, mx)
 }
 
-func (r *router) Delete(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Delete(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodDelete, path, fn, mx)
 }
 
-func (r *router) Head(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Head(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodHead, path, fn, mx)
 }
 
-func (r *router) Options(path string, fn http.HandlerFunc, mx ...middleware) {
+func (r *Router) Options(path string, fn http.HandlerFunc, mx ...Middleware) {
 	r.handle(http.MethodOptions, path, fn, mx)
 }
 
-func (r *router) handle(method, path string, fn http.HandlerFunc, mx []middleware) {
+func (r *Router) Any(path string, fn http.HandlerFunc, mx ...Middleware) {
+	r.handleWithoutMethod(path, fn, mx)
+}
+
+func (r *Router) handle(method, path string, fn http.HandlerFunc, mx []Middleware) {
 	r.Handle(method+" "+path, r.wrap(fn, mx))
 }
 
-func (r *router) wrap(fn http.HandlerFunc, mx []middleware) (out http.Handler) {
+func (r *Router) handleWithoutMethod(path string, fn http.HandlerFunc, mx []Middleware) {
+	r.Handle(path, r.wrap(fn, mx))
+}
+
+func (r *Router) wrap(fn http.HandlerFunc, mx []Middleware) (out http.Handler) {
 	out, mx = http.Handler(fn), append(slices.Clone(r.chain), mx...)
 
 	slices.Reverse(mx)
