@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	mycache "dynamic-proxy/cache"
+	"dynamic-proxy/config"
+	"dynamic-proxy/db"
 	httphelper "dynamic-proxy/util"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"log"
@@ -18,24 +22,28 @@ import (
 	"sync"
 
 	"github.com/eko/gocache/lib/v4/store"
+	"github.com/joho/godotenv"
 	// "time"
 )
 
-func NewServer(logger *log.Logger, config *Config, rateLimitCache mycache.RateLimitCache) http.Handler {
+func NewServer(logger *log.Logger, config *config.Config, rateLimitCache mycache.RateLimitCache, tenantCache mycache.TenantCache) http.Handler {
 
 	// Create a router
 	r := httphelper.NewRouter(loggingMiddleware(logger))
 
 	// Handle proxy
-	r.Any("/", dynamicProxyHandler(logger, config, rateLimitCache), rateLimitByIpMiddleware(logger, rateLimitCache))
+	r.Any("/", dynamicProxyHandler(logger, config, rateLimitCache, tenantCache), rateLimitByIpMiddleware(logger, rateLimitCache))
 
 	// Health check
 	r.Get("/healthz", handleHealthz(logger))
 
+	// Handle clearing cache for specified tenant
+	r.Delete("/invalidate", handleInvalidate(logger, config, tenantCache))
+
 	return r
 }
 
-func dynamicProxyHandler(logger *log.Logger, config *Config, rateLimitCache mycache.RateLimitCache) http.HandlerFunc {
+func dynamicProxyHandler(logger *log.Logger, config *config.Config, rateLimitCache mycache.RateLimitCache, tenantCache mycache.TenantCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isHttps := false
 		if r.TLS != nil {
@@ -43,18 +51,20 @@ func dynamicProxyHandler(logger *log.Logger, config *Config, rateLimitCache myca
 		}
 
 		// startTime := time.Now()
-		targetHostname, err := determineBackend(r.Host, config.TargetBackend, isHttps)
+		targetHostname, err := determineBackend(r.Host, config.TargetBackend, isHttps, tenantCache)
 
 		if err != nil {
 			handleNotFoundRateLimiter(r.RemoteAddr, logger, rateLimitCache)
 			http.Error(w, "Bad gateway", http.StatusBadGateway)
 			logger.Printf("Error determining backend for host %s: %v\n", r.Host, err)
+			return
 		}
 
 		proxy, err := NewProxy(config.TargetBackend, targetHostname)
 		if err != nil {
 			http.Error(w, "Bad gateway", http.StatusBadGateway)
 			logger.Printf("Error creating proxy for target %s: %v\n", targetHostname, err)
+			return
 		}
 		proxy.ServeHTTP(w, r)
 		// duration := time.Now().Sub(startTime)
@@ -69,6 +79,42 @@ func handleHealthz(logger *log.Logger) http.HandlerFunc {
 	}
 }
 
+func handleInvalidate(logger *log.Logger, config *config.Config, tenantCache mycache.TenantCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Get auth bearer token
+		authHeader := strings.Split(r.Header.Get("Authorization"), " ")
+		if len(authHeader) != 2 {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		bearerToken := authHeader[1]
+
+		// Check if token is valid
+		if bearerToken != config.AuthToken {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Get the hostname from the query
+		hostname := r.URL.Query().Get("hostname")
+
+		if hostname == "" {
+			http.Error(w, "Invalid or missing hostname", http.StatusBadRequest)
+			return
+		}
+
+		// Finally, delete the tenant id in the cache
+		err := tenantCache.Delete(context.TODO(), fmt.Sprintf("t-%s", hostname))
+
+		if err != nil {
+			http.Error(w, "Error deleting tenant", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
 func rateLimitByIpMiddleware(logger *log.Logger, rateLimitCache mycache.RateLimitCache) httphelper.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,13 +125,16 @@ func rateLimitByIpMiddleware(logger *log.Logger, rateLimitCache mycache.RateLimi
 			if err != nil {
 				// If we do not get a value in the store, we can assume the user is not being rate limited
 				next.ServeHTTP(w, r)
+				return
 			}
 			logger.Printf("Rate limit value: %v\n", val)
 			if val >= 10 {
 				http.Error(w, "Rate limited", http.StatusTooManyRequests)
 				logger.Printf("Rate limited user: %s\n", r.RemoteAddr)
+				return
 			} else {
 				next.ServeHTTP(w, r)
+				return
 			}
 		})
 	}
@@ -163,42 +212,39 @@ func errorHandler() func(http.ResponseWriter, *http.Request, error) {
 }
 
 // determineBackend
-func determineBackend(hostname string, target string, isHttps bool) (string, error) {
+func determineBackend(hostname string, target string, isHttps bool, tenantCache mycache.TenantCache) (string, error) {
 	// TODO: implement cache/db lookup
+	ctx := context.TODO()
 
-	// Check KV cache for host
-	// i.e. isaac.com will return an arbitrary tenant id such as isaac
-	tenantId := ""
-	if hostname == "1saac.com:8080" {
-		tenantId = "isaac"
+	fmt.Println("Determining backend for host: ", hostname)
+
+	val, err := tenantCache.Get(ctx, fmt.Sprintf("t-%s", hostname))
+
+	if err != nil {
+		return "", errors.New("Tenant does not exist")
 	}
 
 	// Todo handle error
-	if tenantId == "" {
+	if val == "" {
 		return "", errors.New("Error determining backend")
 	}
 
 	// If isHttps then add https
 	if isHttps {
-		return fmt.Sprintf("%s%s.%s", "https://", tenantId, target), nil
+		return fmt.Sprintf("%s%s.%s", "https://", val, target), nil
 	} else {
-		return fmt.Sprintf("%s%s.%s", "http://", tenantId, target), nil
+		return fmt.Sprintf("%s%s.%s", "http://", val, target), nil
 	}
-}
-
-type Config struct {
-	Host          string
-	Port          string
-	TargetBackend string
 }
 
 func run(
 	ctx context.Context,
 	logger *log.Logger,
-	config *Config,
+	config *config.Config,
 	rateLimitCache mycache.RateLimitCache,
+	tenantCache mycache.TenantCache,
 ) error {
-	srv := NewServer(logger, config, rateLimitCache)
+	srv := NewServer(logger, config, rateLimitCache, tenantCache)
 	httpServer := &http.Server{
 		Addr:    net.JoinHostPort(config.Host, config.Port),
 		Handler: srv,
@@ -227,13 +273,44 @@ func run(
 	wg.Wait()
 	return nil
 }
-
 func main() {
 	logger := log.New(os.Stdout, "http: ", log.LstdFlags)
-	config := &Config{
-		Host:          "0.0.0.0",
-		Port:          "8080",
-		TargetBackend: "localhost.test:5173",
+	err := godotenv.Load()
+	if err != nil {
+		logger.Fatalf("Error loading .env file: %s\n", err)
+	}
+
+	envToInt := func(path string) int {
+		val, err := strconv.Atoi(os.Getenv(path))
+		if err != nil {
+			logger.Fatalf("Error converting %s to int: %s\n", path, err)
+		}
+		logger.Println(path, ":", val)
+		return val
+	}
+
+	envToStr := func(path string) string {
+		val := os.Getenv(path)
+		if val == "" {
+			logger.Fatalf("Error converting %s to string: empty value\n", path)
+		}
+		logger.Println(path, ":", val)
+		return val
+	}
+
+	config := &config.Config{
+		Host:          envToStr("HOST"),
+		Port:          envToStr("PORT"),
+		TargetBackend: envToStr("TARGET_BACKEND"),
+		RedisAddr:     envToStr("REDIS_URI"),
+		PostgresAddr: config.PostgresAddr{
+			Host:     envToStr("PG_HOST"),
+			Port:     envToInt("PG_PORT"),
+			User:     envToStr("PG_USER"),
+			Password: envToStr("PG_PASS"),
+			Dbname:   envToStr("PG_DB_NAME"),
+		},
+		AuthToken: envToStr("AUTH_TOKEN"),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -241,8 +318,18 @@ func main() {
 
 	// Setup cache
 	rateLimitCache := mycache.CreateRateLimitCacheManager()
+	tenantCache := mycache.CreateTenantCacheManager(config)
 
-	if err := run(ctx, logger, config, rateLimitCache); err != nil {
+	// Setup postgres
+	err = db.InitPostgres(config.PostgresAddr)
+
+	if err != nil {
+		logger.Fatalf("Error connecting to Postgres: %s\n", err)
+		panic(err)
+	}
+	defer db.PostgresDB.Close()
+
+	if err := run(ctx, logger, config, rateLimitCache, tenantCache); err != nil {
 		logger.Fatalf("Server exited with error: %s\n", err)
 	}
 }
