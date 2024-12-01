@@ -1,6 +1,6 @@
 module dynamic-proxy
 
-go 1.23
+go 1.23.3
 
 require (
 	github.com/dgraph-io/ristretto v0.2.0
