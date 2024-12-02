@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { db } from '../db';
 import { tenantsTable } from '../db/schema';
 import type { TApiData } from './types';
+import { hostnameToValidUrl } from '$lib/utils';
 
 export const getTenantIdExist = async (tenantId: string): Promise<TApiData<boolean>> => {
 	try {
@@ -117,7 +118,7 @@ export const getTenantPageData = async (
 					message: tenantsTable.message
 				})
 				.from(tenantsTable)
-				.where(eq(tenantsTable.id, tenantId))
+				.where(eq(tenantsTable.hostnameFormatted, tenantId))
 		)[0];
 		if (!data) {
 			return {
@@ -149,7 +150,8 @@ export const setHostname = async (
 		await db
 			.update(tenantsTable)
 			.set({
-				hostname: hostname
+				hostname: hostname, // e.g. example.com
+				hostnameFormatted: hostnameToValidUrl(hostname) // e.g. example.com -> example-com
 			})
 			.where(and(eq(tenantsTable.id, tenantId), eq(tenantsTable.userId, userId)));
 

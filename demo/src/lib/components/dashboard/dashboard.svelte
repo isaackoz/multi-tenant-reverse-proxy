@@ -16,6 +16,7 @@
 	import { Textarea } from '../ui/textarea';
 	import { Label } from '../ui/label';
 	import { Input } from '../ui/input';
+	import { hostnameToValidUrl } from '$lib/utils';
 
 	let { tenantData, form }: { tenantData: PageData['tenantData']; form: ActionData } = $props();
 	let title = $state(tenantData?.title ?? '');
@@ -27,7 +28,7 @@
 		<CardHeader>
 			<CardTitle class="text-center font-mono">
 				<a
-					href={`${dev ? 'http://' : 'https://'}${tenantData?.id}.${PUBLIC_DOMAIN}${dev && ':5173'}`}
+					href={`${dev ? 'http://' : 'https://'}${tenantData?.hostname ? hostnameToValidUrl(tenantData.hostname) : ''}.${PUBLIC_DOMAIN}${dev ? ':5173' : ''}`}
 					class="flex justify-center gap-2 text-blue-500 underline underline-offset-4"
 					target="_blank"
 				>

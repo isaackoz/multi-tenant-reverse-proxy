@@ -121,6 +121,12 @@ export const actions = {
 		if (hostname.startsWith('https://') || hostname.startsWith('http://')) {
 			return fail(401, { hostmessage: 'Hostname must not contain protocol (http:// or https://)' });
 		}
+		const validHostname =
+			/^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]))*$/;
+
+		if (!validHostname.test(hostname)) {
+			return fail(401, { hostmessage: 'Invalid hostname' });
+		}
 
 		const { data: userData, error: userError } = await getUserTenant(userId);
 

@@ -1,8 +1,14 @@
 import { PUBLIC_DOMAIN } from '$env/static/public';
+import { hostnameToValidUrl } from '$lib/utils';
 import { type Reroute } from '@sveltejs/kit';
 
 export const reroute: Reroute = ({ url }) => {
 	console.log('Incoming URL', url);
+
+	// Host = host + port
+	// Hostname = host <--- use this one
+	// Port = port
+
 	//
 	// If we try to visit the main website, without a subdomain, we return the route unchanged
 	if (url.hostname === PUBLIC_DOMAIN) {
@@ -13,10 +19,18 @@ export const reroute: Reroute = ({ url }) => {
 		return url.pathname;
 	}
 
-	// Edge case
-	// If the website is accessed from a separate hostname, return a not-found page
+	// Here we have two choices, if the user is trying to access their page at hostname.localhost.test, then
+
+	// If the hostname is example.com and we receive a request from
+	// example.com, the output should be /app/example-com
+	// if we receive on from example-com.localhost, the output should be the same, /app/example-com
+
+	// If the url is from an external source (in our case, a custom custom), then we want to add the hostname to the url
 	if (!url.hostname.endsWith(PUBLIC_DOMAIN)) {
-		return '/not-found';
+		// test.com --> test-com        example.test.com ---> example-test-com
+		const tenantId = hostnameToValidUrl(url.hostname);
+
+		return `/app/${tenantId}${url.pathname}`; // --> /app/test-com?hello=world
 	}
 
 	// If the hostname is not main website, get it's subdomain which should be whatever is to the left of PUBLIC_DOMAIN
