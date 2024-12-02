@@ -51,6 +51,7 @@
 	},
 	"dependencies": {
 		"clerk-sveltekit": "^0.4.2",
+		"dotenv": "^16.4.5",
 		"drizzle-orm": "^0.36.4",
 		"postgres": "^3.4.4"
 	}
