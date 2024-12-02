@@ -2,6 +2,7 @@ import { PUBLIC_DOMAIN } from '$env/static/public';
 import { type Reroute } from '@sveltejs/kit';
 
 export const reroute: Reroute = ({ url }) => {
+	console.log('Incoming URL', url);
 	//
 	// If we try to visit the main website, without a subdomain, we return the route unchanged
 	if (url.hostname === PUBLIC_DOMAIN) {
@@ -26,7 +27,6 @@ export const reroute: Reroute = ({ url }) => {
 	}
 
 	// At this point tenantId should be valid and clean with all edge cases handled
-	console.log('Tenant ID is', [tenantId]);
 
 	// Finally we return all subdomain traffic to our app/[tenant] route. Everything under [tenant]/* will have access to params.tenant
 	// which is the tenantId we extracted here. You can use this tenant Id in database queries to get the tenant specific info.
