@@ -16,7 +16,9 @@ export const getTenantIdExist = async (tenantId: string): Promise<TApiData<boole
 				data: true
 			};
 		}
-	} catch {
+	} catch (e) {
+		console.error(e);
+
 		return {
 			error: {
 				message: 'Error while fetching tenant'
@@ -39,7 +41,8 @@ export const getUserTenant = async (
 				data: data
 			};
 		}
-	} catch {
+	} catch (e) {
+		console.error(e);
 		return {
 			error: {
 				message: 'Error while fetching user tenant'
@@ -60,7 +63,8 @@ export const createUserTenantId = async (
 		return {
 			data: undefined
 		};
-	} catch {
+	} catch (e) {
+		console.error(e);
 		return {
 			error: {
 				message: 'Error while creating user tenant id'
@@ -86,7 +90,9 @@ export const updatePage = async (
 		return {
 			data: null
 		};
-	} catch {
+	} catch (e) {
+		console.error(e);
+
 		return {
 			error: {
 				message: 'Error while updating page'
@@ -123,7 +129,9 @@ export const getTenantPageData = async (
 		return {
 			data: data
 		};
-	} catch {
+	} catch (e) {
+		console.error(e);
+
 		return {
 			error: {
 				message: 'Error while fetching tenant page data'
@@ -146,7 +154,9 @@ export const setHostname = async (
 			.where(and(eq(tenantsTable.id, tenantId), eq(tenantsTable.userId, userId)));
 
 		return { data: null };
-	} catch {
+	} catch (e) {
+		console.error(e);
+
 		return {
 			error: {
 				message: 'Error while updating hostname'
