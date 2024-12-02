@@ -13,12 +13,11 @@ type PostgresAddr struct {
 }
 
 type Config struct {
-	Host          string
-	Port          string
-	TargetBackend string
-	RedisAddr     string
-	PostgresAddr  PostgresAddr
-	AuthToken     string
+	Host         string
+	Port         string
+	RedisAddr    string
+	PostgresAddr PostgresAddr
+	AuthToken    string
 }
 
 // func LoadConfig() (*Config, error) {

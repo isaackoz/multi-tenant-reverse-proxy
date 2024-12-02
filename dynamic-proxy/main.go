@@ -15,8 +15,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,7 +30,7 @@ func NewServer(logger *log.Logger, config *config.Config, rateLimitCache mycache
 	r := httphelper.NewRouter(loggingMiddleware(logger))
 
 	// Handle proxy
-	r.Any("/", dynamicProxyHandler(logger, config, rateLimitCache, tenantCache), rateLimitByIpMiddleware(logger, rateLimitCache))
+	r.Any("/ask", dynamicProxyHandler(logger, config, rateLimitCache, tenantCache), rateLimitByIpMiddleware(logger, rateLimitCache))
 
 	// Health check
 	r.Get("/healthz", handleHealthz(logger))
@@ -45,30 +43,31 @@ func NewServer(logger *log.Logger, config *config.Config, rateLimitCache mycache
 
 func dynamicProxyHandler(logger *log.Logger, config *config.Config, rateLimitCache mycache.RateLimitCache, tenantCache mycache.TenantCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		isHttps := false
-		if r.TLS != nil {
-			isHttps = true
+
+		// Get the domain from the query param /?domain=...
+		domain := r.URL.Query().Get("domain")
+
+		if domain == "" {
+			http.Error(w, "Invalid or missing domain", http.StatusBadRequest)
+			return
 		}
 
-		// startTime := time.Now()
-		targetHostname, err := determineBackend(r.Host, config.TargetBackend, isHttps, tenantCache)
+		isAllowed, err := determineBackend(domain, tenantCache)
 
 		if err != nil {
 			handleNotFoundRateLimiter(r.RemoteAddr, logger, rateLimitCache)
 			http.Error(w, "Bad gateway", http.StatusBadGateway)
-			logger.Printf("Error determining backend for host %s: %v\n", r.Host, err)
+			logger.Printf("Error determining backend for host %s: %v\n", domain, err)
 			return
 		}
 
-		proxy, err := NewProxy(config.TargetBackend, targetHostname)
-		if err != nil {
-			http.Error(w, "Bad gateway", http.StatusBadGateway)
-			logger.Printf("Error creating proxy for target %s: %v\n", targetHostname, err)
+		if isAllowed == false {
+			http.Error(w, "Not allowed", http.StatusBadGateway)
 			return
 		}
-		proxy.ServeHTTP(w, r)
-		// duration := time.Now().Sub(startTime)
-		// logger.Printf("Request took %s\n", duration)
+
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 }
 
@@ -167,44 +166,6 @@ func loggingMiddleware(logger *log.Logger) httphelper.Middleware {
 	}
 }
 
-func NewProxy(targetBackend string, targetHostname string) (*httputil.ReverseProxy, error) {
-	url, err := url.Parse(targetHostname)
-	if err != nil {
-		return nil, err
-	}
-	proxy := httputil.NewSingleHostReverseProxy(url)
-	// proxy := &httputil.ReverseProxy{
-	// 	Rewrite: func(r *httputil.ProxyRequest) {
-	// 		r.SetURL(backendUrl)
-	// 	},
-	// }
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		modifyRequest(req, url.Hostname())
-	}
-
-	proxy.ModifyResponse = modifyResponse()
-	proxy.ErrorHandler = errorHandler()
-	return proxy, nil
-}
-
-func modifyRequest(req *http.Request, targetHostname string) {
-	// TODO: interact with cache/db to modify upstream
-	req.Host = targetHostname
-	req.Header.Set("Host", targetHostname)
-}
-
-func modifyResponse() func(*http.Response) error {
-	return func(resp *http.Response) error {
-		// Example modification; in a real setup, customize as needed
-		if resp.StatusCode == http.StatusBadGateway {
-			return errors.New("response body is invalid")
-		}
-		return nil
-	}
-}
-
 func errorHandler() func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, req *http.Request, err error) {
 		http.Error(w, "Proxy Error", http.StatusBadGateway)
@@ -212,7 +173,7 @@ func errorHandler() func(http.ResponseWriter, *http.Request, error) {
 }
 
 // determineBackend
-func determineBackend(hostname string, target string, isHttps bool, tenantCache mycache.TenantCache) (string, error) {
+func determineBackend(hostname string, tenantCache mycache.TenantCache) (bool, error) {
 	// TODO: implement cache/db lookup
 	ctx := context.TODO()
 
@@ -221,20 +182,14 @@ func determineBackend(hostname string, target string, isHttps bool, tenantCache 
 	val, err := tenantCache.Get(ctx, fmt.Sprintf("t-%s", hostname))
 
 	if err != nil {
-		return "", errors.New("Tenant does not exist")
+		return false, errors.New("Tenant does not exist")
 	}
 
-	// Todo handle error
 	if val == "" {
-		return "", errors.New("Error determining backend")
+		return false, errors.New("Error determining backend")
 	}
 
-	// If isHttps then add https
-	if isHttps {
-		return fmt.Sprintf("%s%s.%s", "https://", val, target), nil
-	} else {
-		return fmt.Sprintf("%s%s.%s", "http://", val, target), nil
-	}
+	return true, nil
 }
 
 func run(
@@ -299,10 +254,9 @@ func main() {
 	}
 
 	config := &config.Config{
-		Host:          envToStr("HOST"),
-		Port:          envToStr("PORT"),
-		TargetBackend: envToStr("TARGET_BACKEND"),
-		RedisAddr:     envToStr("REDIS_URI"),
+		Host:      envToStr("HOST"),
+		Port:      envToStr("PORT"),
+		RedisAddr: envToStr("REDIS_URI"),
 		PostgresAddr: config.PostgresAddr{
 			Host:     envToStr("PG_HOST"),
 			Port:     envToInt("PG_PORT"),
